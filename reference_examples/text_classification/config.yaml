@@ -20,7 +20,15 @@ inner_loop:
 
 # Models to test
 models:
-  - model: openrouter/openai/gpt-oss-120b
+  # CS224V: local Ollama task model (no school API key). See local-llm/README.md.
+  # Set TEXT_CLASSIFICATION_MAX_INFLIGHT to Ollama's parallel slots before running.
+  - model: gpt-oss-20b
+    api_base: http://localhost:11434/v1
+  # Fast debugging model (weak on LawBench; pipeline tests only):
+  # - model: qwen3.5-4b
+  #   api_base: http://localhost:11434/v1
+  # - model: gemini/gemini-3.1-flash-lite
+  # - model: openrouter/openai/gpt-oss-120b
   # To use a custom OpenAI-compatible endpoint instead, switch to e.g.:
   # - model: gpt-oss-120b
   #   api_base: https://your-api-host/v1
@@ -28,11 +36,12 @@ models:
 # Benchmark sweep settings
 benchmark:
   seeds: [42]              # multi-seed: [42, 123, 456]
-  concurrency: 16
+  concurrency: 1           # CS224V: one job at a time; a single local GPU serves all calls
 
 # Datasets to test
 datasets:
-  - USPTO
+  # CS224V proposal: LawBench (primary) + Symptom2Disease; USPTO excluded
+  # - USPTO
   - Symptom2Disease
   - LawBench
 

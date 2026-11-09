@@ -150,6 +150,11 @@ class ProviderLLM:
         self._usage_lock = threading.Lock()
         self._cache_lock = threading.Lock()
         self._executor = ThreadPoolExecutor(max_workers=max_concurrent)
+        # CS224V: a single local GPU (Ollama) serves a few requests at a time.
+        # Without a cap, inner_loop's 32 threads queue up on the server and hit
+        # the 600 s client timeout. Opt in with TEXT_CLASSIFICATION_MAX_INFLIGHT.
+        inflight = os.environ.get("TEXT_CLASSIFICATION_MAX_INFLIGHT")
+        self._inflight = threading.BoundedSemaphore(int(inflight)) if inflight else None
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
     def __exit__(self, *exc):
@@ -217,7 +222,13 @@ class ProviderLLM:
             call_kwargs["api_key"] = self.api_key
 
         model = self._normalized_model()
-        response = litellm_completion(model=model, messages=messages, **call_kwargs)
+        if self._inflight is not None:
+            with self._inflight:
+                response = litellm_completion(
+                    model=model, messages=messages, **call_kwargs
+                )
+        else:
+            response = litellm_completion(model=model, messages=messages, **call_kwargs)
         content = _extract_content(response)
 
         usage = getattr(response, "usage", None)
