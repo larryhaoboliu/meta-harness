@@ -189,6 +189,63 @@ def propose_claude(task_prompt, iteration, timeout=2400):
     return PENDING_EVAL.exists()
 
 
+def archive_proposal(iteration):
+    """CS224V: keep a copy of this iteration's pending_eval.json.
+
+    Upstream deletes pending_eval.json at the start of every iteration, and it
+    is the only place each candidate's `base_system` (the candidate it was
+    built from) is recorded. evolution_summary.jsonl does not store it. The
+    evidence index needs that lineage to link a fixed failure to the code
+    edit that fixed it, so each proposal is copied to
+    `<LOGS_DIR>/proposals/iter_<NNN>.json` before anything else reads it.
+
+    Args:
+        iteration: The iteration number; zero-padded to 3 digits in the file
+            name so the files sort in order.
+    """
+    dest = LOGS_DIR / "proposals" / f"iter_{iteration:03d}.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(PENDING_EVAL.read_text())
+
+
+def run_pre_propose_cmd(cmd_template):
+    """CS224V: run an optional shell command before each proposer session.
+
+    The evidence-index arms use this to rebuild their index from the archive
+    (see evidence-index/ei/build_index.py). Running it right before the
+    proposer starts, rather than after evaluation, keeps one simple rule: the
+    index the proposer sees always covers every evaluated candidate, including
+    after a resumed run or a freshly copied workspace.
+
+    Placeholders in the template are filled in with absolute paths:
+        {logs_dir}    this run's logs directory (LOGS_DIR)
+        {agents_dir}  the folder holding candidate source files (AGENTS_DIR)
+
+    Args:
+        cmd_template: The command string from --pre-propose-cmd, or None to
+            do nothing (the default; plain Meta-Harness behaviour).
+
+    Raises:
+        SystemExit: If the command fails. A stale or missing index would
+            silently change what the arm's proposer sees, so the run stops
+            instead. It can be resumed with the same --run-name after the
+            command is fixed.
+    """
+    if not cmd_template:
+        return
+    cmd = cmd_template.format(logs_dir=LOGS_DIR, agents_dir=AGENTS_DIR)
+    print(f"  {_ts()} {_cyan('pre-propose')} {cmd}", flush=True)
+    # shell=True: the command is a user-supplied string from the CLI, so let
+    # the shell handle quoting the way it would on the command line.
+    result = subprocess.run(
+        cmd, shell=True, cwd=str(EVOLVE_DIR), capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print(f"  {_red('pre-propose command failed')} exit={result.returncode}")
+        print(_dim((result.stdout + result.stderr)[-2000:]))
+        raise SystemExit(1)
+
+
 def validate_candidates(candidates):
     """Import-check each candidate. Returns list of valid candidates."""
     valid = []
@@ -464,6 +521,11 @@ def run_evolve(args):
 
         task_prompt = render_task_prompt(iteration, len(datasets))
 
+        # CS224V: refresh derived evidence (e.g. a failure index) right before
+        # the proposer reads the archive, so it always reflects every evaluation.
+        # getattr: tests build their own argparse.Namespace without this field.
+        run_pre_propose_cmd(getattr(args, "pre_propose_cmd", None))
+
         if PENDING_EVAL.exists():
             PENDING_EVAL.unlink()
 
@@ -479,6 +541,7 @@ def run_evolve(args):
             )
             continue
 
+        archive_proposal(iteration)
         candidates = json.loads(PENDING_EVAL.read_text()).get("candidates", [])
         print(
             f"  {_ts()} proposed {len(candidates)} candidate(s) in {_elapsed(propose_time)}"
@@ -607,6 +670,16 @@ def main():
     )
     parser.add_argument(
         "--skip-baseline", action="store_true", help="Skip Phase 0 baseline eval"
+    )
+    parser.add_argument(
+        "--pre-propose-cmd",
+        type=str,
+        default=None,
+        help=(
+            "CS224V: shell command run before each proposer session, e.g. to "
+            "rebuild a failure index. {logs_dir} and {agents_dir} are replaced "
+            "with absolute paths. The run stops if the command fails."
+        ),
     )
     parser.add_argument(
         "--test",
