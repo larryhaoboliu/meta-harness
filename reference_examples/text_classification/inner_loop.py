@@ -1,5 +1,6 @@
 """Inner Loop: Online and offline training with memory systems."""
 
+import hashlib
 import json
 import threading
 import time
@@ -437,7 +438,7 @@ def evaluate_memory(
         }
 
     def predict_one(idx: int, ex: dict[str, Any]) -> tuple:
-        pred, _ = memory.predict(ex["input"])
+        pred, pred_meta = memory.predict(ex["input"])
         prompt_info = memory.get_last_prompt_info()
         prompt_len = prompt_info.get("prompt_len") or 0
         prompt_text = prompt_info.get("prompt_text") or ""
@@ -452,6 +453,11 @@ def evaluate_memory(
             "prompt_len": prompt_len,
             "context_len": context_len,
             "prompt_text": prompt_text,
+            # CS224V: upstream discarded predict()'s metadata. Keep it so that
+            # write_val_predictions() can save the raw model output (baselines
+            # return it as "full_response"). Candidates may return anything, so
+            # a non-dict is replaced with {} rather than failing the evaluation.
+            "predict_metadata": pred_meta if isinstance(pred_meta, dict) else {},
         }
         if metrics:
             result["metrics"] = metrics
@@ -474,6 +480,99 @@ def evaluate_memory(
         "predictions": results,
         "avg_context_len": avg_context_len,
     }
+
+
+def example_uid(ex: dict[str, Any]) -> str:
+    """CS224V: return a stable ID for a dataset example.
+
+    The datasets have no ID field, so the ID is the first 12 hex digits of the
+    SHA-1 of the example's `input` text. That text is fixed by the dataset and
+    the split seed, not by the candidate. So the same validation example has
+    the same uid in every candidate's predictions, and failures can be matched
+    across candidates ("fixed by", "still wrong", "new error").
+
+    Two examples with identical input text would share a uid. The position
+    within the split (`idx` in write_val_predictions) tells them apart.
+
+    Args:
+        ex: A dataset example with at least an "input" key.
+
+    Returns:
+        A 12-character lowercase hex string.
+    """
+    return hashlib.sha1(ex["input"].encode("utf-8")).hexdigest()[:12]
+
+
+def write_val_predictions(
+    path: str | Path, examples: list[dict[str, Any]], preds: list[dict[str, Any]]
+) -> None:
+    """CS224V: write one JSON line per validation example, the per-example raw trace.
+
+    Upstream stores only aggregate accuracy (val.json), so neither the proposer
+    nor a failure index can see which examples failed or why. The evidence-index
+    experiment needs this file in every arm. The proposal requires all arms to
+    have the same raw detail, so it is written for every candidate, not only
+    in the indexed arms.
+
+    Only validation predictions are written. Test predictions are never saved,
+    because the proposer must not see held-out results during the search.
+
+    Fields of each line:
+        idx            Position in the validation split (0-based). Fixed for a
+                       given dataset and seed.
+        uid            example_uid(): stable across candidates.
+        question       The bare question (`raw_question`), without the task
+                       instructions and label list that `input` adds. Easier to
+                       read in tables.
+        target         Gold label as stored in the dataset.
+        prediction     The candidate's extracted answer, as the evaluator saw it.
+                       Empty if the model returned no parsable answer.
+        was_correct    The evaluator's verdict.
+        prompt_len     Characters in the last prompt sent to the model.
+        context_len    prompt_len minus the input length: roughly the template
+                       plus whatever memory the candidate injected.
+        response       The raw model output, if predict() returned it as
+                       metadata["full_response"]; otherwise None.
+        predict_metadata  Any other metadata predict() returned (JSON-safe; values
+                       that are not JSON types are written with str()).
+        prompt_text    The full last prompt sent to the model.
+
+    Args:
+        path: Output file. Conventionally `val_predictions.jsonl` next to
+            val.json. Parent folders are created; an existing file is replaced.
+        examples: The validation examples, in the order they were evaluated.
+        preds: evaluate_memory()["predictions"] for those examples, same order.
+
+    Raises:
+        ValueError: If examples and preds have different lengths. That would
+            mean rows were matched to the wrong examples, so stop instead.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        for idx, (ex, p) in enumerate(zip(examples, preds, strict=True)):
+            meta = p.get("predict_metadata") or {}
+            # The raw output gets its own top-level field; drop it from the rest
+            # of the metadata so it isn't stored twice.
+            response = meta.get("full_response")
+            row = {
+                "idx": idx,
+                "uid": example_uid(ex),
+                "question": ex.get("raw_question", ""),
+                "target": p["target"],
+                "prediction": p["prediction"],
+                "was_correct": p["was_correct"],
+                "prompt_len": p["prompt_len"],
+                "context_len": p["context_len"],
+                "response": response if isinstance(response, str) else None,
+                "predict_metadata": {
+                    k: v for k, v in meta.items() if k != "full_response"
+                },
+                "prompt_text": p["prompt_text"],
+            }
+            # ensure_ascii=False keeps Chinese (LawBench) text readable in the
+            # file. default=str stops odd metadata types from crashing the run.
+            f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
 
 
 def load_memory_system(path: str, llm) -> MemorySystem:
@@ -817,6 +916,11 @@ if __name__ == "__main__":
         with open(args.val_output, "w") as f:
             json.dump(_build_output(val_result), f, indent=2)
         print(f"Saved val results to {args.val_output}", flush=True)
+        # CS224V: per-example validation traces, next to val.json, so the
+        # proposer finds them at logs/<dataset>/<memory>/<model>/ (see SKILL.md).
+        preds_path = Path(args.val_output).with_name("val_predictions.jsonl")
+        write_val_predictions(preds_path, val_examples, val_preds)
+        print(f"Saved val predictions to {preds_path}", flush=True)
 
     if args.test_output and test_result:
         Path(args.test_output).parent.mkdir(parents=True, exist_ok=True)

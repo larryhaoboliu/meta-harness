@@ -122,6 +122,7 @@ class MemorySystem(ABC):
 ## Directory Structure
 
 - Val results: `logs/<dataset>/<memory>/<model>/val.json` (accuracy field)
+- Per-example val predictions: `logs/<dataset>/<memory>/<model>/val_predictions.jsonl` (one JSON line per validation example: `idx`, `uid`, `question`, `target`, `prediction`, `was_correct`, `response`, `prompt_text`)
 - Training logs: `logs/<dataset>/<memory>/<model>/log.jsonl`
 - Memory state: `logs/<dataset>/<memory>/<model>/memory.json`
 - Test results: `results/<dataset>/<memory>/<model>/test.json` (separate dir, never exposed during evolution)
@@ -136,4 +137,4 @@ One JSON object per line, one line per evaluated candidate:
 
 ## Component Analysis
 
-Treat `evolution_summary.jsonl`, `frontier_val.json`, and recent training traces as the only shipped history sources in this trimmed repo.
+Treat `evolution_summary.jsonl`, `frontier_val.json`, recent training traces, and the per-example `val_predictions.jsonl` files as the shipped history sources in this trimmed repo.
